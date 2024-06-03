@@ -1,19 +1,25 @@
-use std::net::TcpListener;
+use std::{io::Write, net::TcpListener};
 
-fn main() {
-    // You can use print statements as follows for debugging, they'll be visible when running tests.
-    println!("Logs from your program will appear here!");
+use anyhow::Context;
 
+fn main() -> anyhow::Result<()> {
     let listener = TcpListener::bind("127.0.0.1:4221").unwrap();
 
     for stream in listener.incoming() {
-        match stream {
-            Ok(_stream) => {
-                println!("accepted new connection");
-            }
-            Err(e) => {
-                println!("error: {}", e);
-            }
-        }
+        let mut stream = stream.context("accept connection")?;
+
+        println!("accepted new connection");
+
+        let status_line = "HTTP/1.1 200 OK";
+        let headers = "";
+        let body = "";
+
+        let response = format!("{status_line}\r\n{headers}\r\n\r\n{body}");
+
+        stream
+            .write_all(response.as_bytes())
+            .context("write response")?;
     }
+
+    Ok(())
 }
