@@ -10,6 +10,7 @@ use nom::{
 };
 use std::{
     collections::HashMap,
+    fmt::{self, Display, Formatter},
     io::{BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream},
 };
@@ -64,13 +65,29 @@ impl RequestLine {
 #[derive(Debug, Eq, PartialEq, Hash)]
 pub enum Header {
     UserAgent,
+    ContentType,
+    ContentLength,
 }
 
 impl Header {
     pub fn parse(input: &str) -> IResult<&str, Header> {
-        let mut parser = alt((tag("User-Agent").map(|_| Header::UserAgent),));
+        let mut parser = alt((
+            tag("User-Agent").map(|_| Header::UserAgent),
+            tag("Content-Type").map(|_| Header::ContentType),
+            tag("Content-Length").map(|_| Header::ContentLength),
+        ));
 
         parser(input)
+    }
+}
+
+impl Display for Header {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        match self {
+            Header::UserAgent => write!(f, "User-Agent"),
+            Header::ContentType => write!(f, "Content-Type"),
+            Header::ContentLength => write!(f, "Content-Length"),
+        }
     }
 }
 
@@ -107,12 +124,40 @@ mod tests {
     }
 }
 
-fn handle_socket(mut stream: TcpStream) -> anyhow::Result<()> {
-    // TODO use Content-Length
-    // let mut buffer = vec![0; 1024];
-    // stream.read(&mut buffer).context("read stream")?;
+pub enum Status {
+    Ok,
+    NotFound,
+}
 
-    let mut reader = BufReader::new(&stream);
+impl Display for Status {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        match self {
+            Status::Ok => write!(f, "200 OK"),
+            Status::NotFound => write!(f, "404 Not Found"),
+        }
+    }
+}
+
+struct Response {
+    status: Status,
+    headers: HashMap<Header, String>,
+    body: String,
+}
+
+impl Display for Response {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        write!(f, "HTTP/1.1 {}\r\n", self.status)?;
+
+        for (header, value) in &self.headers {
+            write!(f, "{}: {}\r\n", header, value)?;
+        }
+
+        write!(f, "\r\n{}", self.body)
+    }
+}
+
+fn handle_socket(mut stream: TcpStream) -> anyhow::Result<()> {
+    let reader = BufReader::new(&stream);
     let mut lines = reader.lines().flatten();
 
     let request_line = lines.next().context("read request line")?;
@@ -135,63 +180,56 @@ fn handle_socket(mut stream: TcpStream) -> anyhow::Result<()> {
 
     // TODO parse data
 
-    // let a = reader.lines().flatten().take_while(|line| !line.is_empty());
-
-    // let a = a.collect_vec();
-    // dbg!(a);
-
-    // let mut line = String::new();
-    // let a = reader.read_line(&mut line);
-
-    // a.lines()
-
-    // let request_string = String::from_utf8(buffer).context("parse to utf8")?;
-
     let (_, request_line) = RequestLine::parse(&request_line)
         .map_err(|err| err.to_owned())
         .context("parse request")?;
 
-    // let status_line = "HTTP/1.1 200 OK";
-    // let headers = "";
-    // let body = "";
-
-    // let response = format!("{status_line}\r\n{headers}\r\n\r\n{body}");
-
     let response = if request_line.path.as_str() == "/" {
-        let status_line = "HTTP/1.1 200 OK";
-        let headers = "";
-        let body = "";
-
-        format!("{status_line}\r\n{headers}\r\n\r\n{body}")
+        Response {
+            status: Status::Ok,
+            headers: HashMap::new(),
+            body: String::new(),
+        }
     } else if request_line.path.as_str() == "/user-agent" {
         let user_agent = headers
             .get(&Header::UserAgent)
             .context("user-agent header not found")?;
 
-        let status_line = "HTTP/1.1 200 OK";
-        let headers = format!(
-            "Content-Type: text/plain\r\nContent-Length: {}",
-            user_agent.len()
-        );
-        let body = user_agent;
+        let headers = HashMap::from_iter([
+            (Header::ContentType, "text/plain".to_owned()),
+            (Header::ContentLength, user_agent.len().to_string()),
+        ]);
 
-        format!("{status_line}\r\n{headers}\r\n\r\n{body}")
+        let body = user_agent.clone();
+
+        Response {
+            status: Status::Ok,
+            headers,
+            body,
+        }
     } else if let Some(echo) = request_line.path.strip_prefix("/echo/") {
-        let status_line = "HTTP/1.1 200 OK";
-        let headers = format!("Content-Type: text/plain\r\nContent-Length: {}", echo.len());
-        let body = echo;
+        let headers = HashMap::from_iter([
+            (Header::ContentType, "text/plain".to_owned()),
+            (Header::ContentLength, echo.len().to_string()),
+        ]);
 
-        format!("{status_line}\r\n{headers}\r\n\r\n{body}")
+        let body = echo.to_owned();
+
+        Response {
+            status: Status::Ok,
+            headers,
+            body,
+        }
     } else {
-        let status_line = "HTTP/1.1 404 Not Found";
-        let headers = "";
-        let body = "";
-
-        format!("{status_line}\r\n{headers}\r\n\r\n{body}")
+        Response {
+            status: Status::NotFound,
+            headers: HashMap::new(),
+            body: String::new(),
+        }
     };
 
     stream
-        .write_all(response.as_bytes())
+        .write_all(response.to_string().as_bytes())
         .context("write response")?;
 
     Ok(())
