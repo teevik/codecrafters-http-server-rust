@@ -1,9 +1,7 @@
 use anyhow::Context;
-use itertools::Itertools;
 use nom::{
     branch::alt,
-    bytes::streaming::{tag, take_until, take_until1},
-    character::streaming::crlf,
+    bytes::streaming::{tag, take_until1},
     combinator::rest,
     sequence::{separated_pair, tuple},
     IResult, Parser,
@@ -11,7 +9,9 @@ use nom::{
 use std::{
     collections::HashMap,
     fmt::{self, Display, Formatter},
-    io::{BufRead, BufReader, Read, Write},
+};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
 };
 
@@ -156,15 +156,21 @@ impl Display for Response {
     }
 }
 
-fn handle_socket(mut stream: TcpStream) -> anyhow::Result<()> {
-    let reader = BufReader::new(&stream);
-    let mut lines = reader.lines().flatten();
+async fn handle_socket(mut stream: TcpStream) -> anyhow::Result<()> {
+    let (reader, mut writer) = stream.split();
 
-    let request_line = lines.next().context("read request line")?;
+    let reader = BufReader::new(reader);
+    let mut lines = reader.lines();
+
+    let request_line = lines
+        .next_line()
+        .await
+        .context("read request line")?
+        .context("no request line")?;
 
     let mut headers = HashMap::new();
 
-    while let Some(header_line) = lines.next() {
+    while let Some(header_line) = lines.next_line().await.context("read header")? {
         if header_line.is_empty() {
             break;
         }
@@ -228,25 +234,26 @@ fn handle_socket(mut stream: TcpStream) -> anyhow::Result<()> {
         }
     };
 
-    stream
+    writer
         .write_all(response.to_string().as_bytes())
+        .await
         .context("write response")?;
 
     Ok(())
 }
 
-fn main() -> anyhow::Result<()> {
-    let listener = TcpListener::bind("127.0.0.1:4221").unwrap();
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:4221")
+        .await
+        .context("bind socket")?;
 
-    for stream in listener.incoming() {
-        let stream = stream.context("accept connection")?;
+    loop {
+        let (socket, _) = listener.accept().await.context("accept listener")?;
 
         println!("accepted new connection");
 
-        let result = handle_socket(stream);
-        if let Err(error) = result {
-            println!("error while handling socket: {:?}", error);
-        }
+        tokio::spawn(handle_socket(socket));
     }
 
     Ok(())
