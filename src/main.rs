@@ -107,22 +107,24 @@ fn handle_socket(mut stream: TcpStream) -> anyhow::Result<()> {
         .map_err(|err| err.to_owned())
         .context("parse request")?;
 
-    let response = match request.path.as_str() {
-        "/" => {
-            let status_line = "HTTP/1.1 200 OK";
-            let headers = "";
-            let body = "";
+    let response = if request.path.as_str() == "/" {
+        let status_line = "HTTP/1.1 200 OK";
+        let headers = "";
+        let body = "";
 
-            format!("{status_line}\r\n{headers}\r\n\r\n{body}")
-        }
+        format!("{status_line}\r\n{headers}\r\n\r\n{body}")
+    } else if let Some(echo) = request.path.strip_prefix("/echo/") {
+        let status_line = "HTTP/1.1 200 OK";
+        let headers = format!("Content-Type: text/plain\r\nContent-Length: {}", echo.len());
+        let body = echo;
 
-        _ => {
-            let status_line = "HTTP/1.1 404 Not Found";
-            let headers = "";
-            let body = "";
+        format!("{status_line}\r\n{headers}\r\n\r\n{body}")
+    } else {
+        let status_line = "HTTP/1.1 404 Not Found";
+        let headers = "";
+        let body = "";
 
-            format!("{status_line}\r\n{headers}\r\n\r\n{body}")
-        }
+        format!("{status_line}\r\n{headers}\r\n\r\n{body}")
     };
 
     stream
