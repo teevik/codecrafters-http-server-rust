@@ -1,13 +1,16 @@
 use anyhow::Context;
 use nom::{
     branch::alt,
-    bytes::complete::{tag, take_until, take_until1},
-    character::complete::crlf,
+    bytes::streaming::{tag, take_until, take_until1},
+    character::streaming::crlf,
     combinator::rest,
     sequence::tuple,
     IResult, Parser,
 };
-use std::{io::Write, net::TcpListener};
+use std::{
+    io::{Read, Write},
+    net::{TcpListener, TcpStream},
+};
 
 #[derive(Debug)]
 pub enum Method {
@@ -39,7 +42,7 @@ pub struct Request {
 impl Request {
     pub fn parse(input: &str) -> IResult<&str, Request> {
         let space = &tag(" ");
-        let until_space = &take_until1(" ");
+        let until_space = take_until1(" ");
         let until_crlf = &take_until("\r\n");
 
         struct RequestLine {
@@ -48,9 +51,10 @@ impl Request {
         }
 
         let request_line = tuple((Method::parse, space, until_space, space, until_crlf)).map(
-            |(method, _, path, _, _)| RequestLine {
-                method,
-                path: path.to_string(),
+            |(method, _, path, _, _)| {
+                let path = path.to_owned();
+
+                RequestLine { method, path }
             },
         );
 
@@ -92,23 +96,54 @@ mod tests {
     }
 }
 
+fn handle_socket(mut stream: TcpStream) -> anyhow::Result<()> {
+    // TODO use Content-Length
+    let mut buffer = vec![0; 1024];
+    stream.read(&mut buffer).context("read stream")?;
+
+    let request_string = String::from_utf8(buffer).context("parse to utf8")?;
+
+    let (_, request) = Request::parse(&request_string)
+        .map_err(|err| err.to_owned())
+        .context("parse request")?;
+
+    let response = match request.path.as_str() {
+        "/" => {
+            let status_line = "HTTP/1.1 200 OK";
+            let headers = "";
+            let body = "";
+
+            format!("{status_line}\r\n{headers}\r\n\r\n{body}")
+        }
+
+        _ => {
+            let status_line = "HTTP/1.1 404 Not Found";
+            let headers = "";
+            let body = "";
+
+            format!("{status_line}\r\n{headers}\r\n\r\n{body}")
+        }
+    };
+
+    stream
+        .write_all(response.as_bytes())
+        .context("write response")?;
+
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     let listener = TcpListener::bind("127.0.0.1:4221").unwrap();
 
     for stream in listener.incoming() {
-        let mut stream = stream.context("accept connection")?;
+        let stream = stream.context("accept connection")?;
 
         println!("accepted new connection");
 
-        let status_line = "HTTP/1.1 200 OK";
-        let headers = "";
-        let body = "";
-
-        let response = format!("{status_line}\r\n{headers}\r\n\r\n{body}");
-
-        stream
-            .write_all(response.as_bytes())
-            .context("write response")?;
+        let result = handle_socket(stream);
+        if let Err(error) = result {
+            println!("error while handling socket: {:?}", error);
+        }
     }
 
     Ok(())
