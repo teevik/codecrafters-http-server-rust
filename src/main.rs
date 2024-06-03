@@ -1,14 +1,16 @@
 use anyhow::Context;
+use itertools::Itertools;
 use nom::{
     branch::alt,
     bytes::streaming::{tag, take_until, take_until1},
     character::streaming::crlf,
     combinator::rest,
-    sequence::tuple,
+    sequence::{separated_pair, tuple},
     IResult, Parser,
 };
 use std::{
-    io::{Read, Write},
+    collections::HashMap,
+    io::{BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream},
 };
 
@@ -34,39 +36,48 @@ impl Method {
 }
 
 #[derive(Debug)]
-pub struct Request {
+pub struct RequestLine {
     pub method: Method,
     pub path: String,
 }
 
-impl Request {
-    pub fn parse(input: &str) -> IResult<&str, Request> {
+impl RequestLine {
+    pub fn parse(input: &str) -> IResult<&str, RequestLine> {
         let space = &tag(" ");
         let until_space = take_until1(" ");
-        let until_crlf = &take_until("\r\n");
 
-        struct RequestLine {
-            method: Method,
-            path: String,
-        }
-
-        let request_line = tuple((Method::parse, space, until_space, space, until_crlf)).map(
-            |(method, _, path, _, _)| {
+        let mut parser = tuple((Method::parse, space, until_space, space, rest))
+            .map(|(method, _, path, _, _)| {
                 let path = path.to_owned();
 
                 RequestLine { method, path }
-            },
-        );
-
-        let mut parser = tuple((request_line, crlf, until_crlf, crlf, rest)).map(
-            |(request_line, _, _, _, _)| Request {
+            })
+            .map(|request_line| RequestLine {
                 method: request_line.method,
                 path: request_line.path,
-            },
-        );
+            });
 
         parser.parse(input)
     }
+}
+
+#[derive(Debug, Eq, PartialEq, Hash)]
+pub enum Header {
+    UserAgent,
+}
+
+impl Header {
+    pub fn parse(input: &str) -> IResult<&str, Header> {
+        let mut parser = alt((tag("User-Agent").map(|_| Header::UserAgent),));
+
+        parser(input)
+    }
+}
+
+fn parse_header_value(line: &str) -> IResult<&str, (Header, &str)> {
+    let mut parser = separated_pair(Header::parse, tag(": "), rest);
+
+    parser(line)
 }
 
 #[cfg(test)]
@@ -82,9 +93,9 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_request() {
+    fn test_parse_request_line() {
         let data = "GET / HTTP/1.1\r\n\r\n";
-        let result = Request::parse(data);
+        let result = RequestLine::parse(data);
 
         let (rest, request) = result.expect("parse request");
 
@@ -98,22 +109,74 @@ mod tests {
 
 fn handle_socket(mut stream: TcpStream) -> anyhow::Result<()> {
     // TODO use Content-Length
-    let mut buffer = vec![0; 1024];
-    stream.read(&mut buffer).context("read stream")?;
+    // let mut buffer = vec![0; 1024];
+    // stream.read(&mut buffer).context("read stream")?;
 
-    let request_string = String::from_utf8(buffer).context("parse to utf8")?;
+    let mut reader = BufReader::new(&stream);
+    let mut lines = reader.lines().flatten();
 
-    let (_, request) = Request::parse(&request_string)
+    let request_line = lines.next().context("read request line")?;
+
+    let mut headers = HashMap::new();
+
+    while let Some(header_line) = lines.next() {
+        if header_line.is_empty() {
+            break;
+        }
+
+        let Ok((_, (header, value))) = parse_header_value(&header_line) else {
+            // Unknown header
+            // TODO handle it?
+            continue;
+        };
+
+        headers.insert(header, value.to_owned());
+    }
+
+    // TODO parse data
+
+    // let a = reader.lines().flatten().take_while(|line| !line.is_empty());
+
+    // let a = a.collect_vec();
+    // dbg!(a);
+
+    // let mut line = String::new();
+    // let a = reader.read_line(&mut line);
+
+    // a.lines()
+
+    // let request_string = String::from_utf8(buffer).context("parse to utf8")?;
+
+    let (_, request_line) = RequestLine::parse(&request_line)
         .map_err(|err| err.to_owned())
         .context("parse request")?;
 
-    let response = if request.path.as_str() == "/" {
+    // let status_line = "HTTP/1.1 200 OK";
+    // let headers = "";
+    // let body = "";
+
+    // let response = format!("{status_line}\r\n{headers}\r\n\r\n{body}");
+
+    let response = if request_line.path.as_str() == "/" {
         let status_line = "HTTP/1.1 200 OK";
         let headers = "";
         let body = "";
 
         format!("{status_line}\r\n{headers}\r\n\r\n{body}")
-    } else if let Some(echo) = request.path.strip_prefix("/echo/") {
+    } else if request_line.path.as_str() == "/user-agent" {
+        let user_agent = headers
+            .get(&Header::UserAgent)
+            .context("user-agent header not found")?;
+
+        let status_line = "HTTP/1.1 200 OK";
+        let headers = format!(
+            "Content-Type: text/plain\r\nContent-Length: {}",
+            user_agent.len()
+        );
+        let body = user_agent;
+
+        format!("{status_line}\r\n{headers}\r\n\r\n{body}")
+    } else if let Some(echo) = request_line.path.strip_prefix("/echo/") {
         let status_line = "HTTP/1.1 200 OK";
         let headers = format!("Content-Type: text/plain\r\nContent-Length: {}", echo.len());
         let body = echo;
